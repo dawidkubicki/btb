@@ -109,6 +109,13 @@ class BullishSectorBot:
         df['macd'] = macd.macd()
         df['macd_signal'] = macd.macd_signal()
 
+        # For mean reversion strategy
+        df['roc'] = ta.momentum.ROCIndicator(df['Close']).roc()
+        df['std_dev'] = df['Close'].rolling(window=20).std()
+        df['mean_dev_from_ma'] = df['Close'] - df['Close'].rolling(window=20).mean()
+        stoch = ta.momentum.StochasticOscillator(df['High'], df['Low'], df['Close'], window=14, smooth_window=3)
+        df['stoch'] = stoch.stoch()
+
         df = df.dropna()
         df = df.reset_index()
 
@@ -146,6 +153,25 @@ class BullishSectorBot:
         # MACD
         if latest_data['macd'] > latest_data['macd_signal']:
             score += 1  # Adjust the points based on your criteria
+
+        # For Mean Reversion Strategy ============================
+
+        # ROC for potential reversal
+        if latest_data['roc'] < -5:  # Example threshold
+            score += 1
+
+        # High Standard Deviation (Volatility)
+        if latest_data['std_dev'] > data['std_dev'].mean():  # Above average volatility
+            score += 1
+
+        # Mean Deviation from Moving Average
+        if abs(latest_data['mean_dev_from_ma']) > data['mean_dev_from_ma'].mean():  # Far from mean
+            score += 1
+
+        # Stochastic Oscillator for overbought/oversold
+        if latest_data['stoch'] < 20 or latest_data['stoch'] > 80:  # Overbought/Oversold conditions
+            score += 1
+
 
         return score
     
@@ -185,79 +211,88 @@ class BullishSectorBot:
         :param take_profit_price: Price at which to take profit
         :param stop_loss_price: Price at which to set the stop loss
 
-        :return oco_order_id:str
+        :return oco_order_id
         """
         try:
             stop_loss_limit_price = stop_loss_price * (1 - stop_loss_limit_percent)  # Adjust the offset as needed
-            oco_order = self.binance_client.private_post_order_oco(
-                symbol=symbol,
-                side='sell',
-                quantity=quantity,
-                price=take_profit_price,
-                stopPrice=stop_loss_price,
-                stopLimitPrice=stop_loss_limit_price,
-                stopLimitTimeInForce='GTC'
-            )
-            print(f"OCO order placed: {oco_order}")
-            self.send_message(f"OCO order placed with TP: {take_profit_price}, and SL: {stop_loss_price}. Price of {symbol}: {self.binance_client.fetch_ticker(symbol)['last']}")
-            oco_order_id = oco_order.get('orderListId', None)
 
-            return oco_order_id
+            params = {
+                "symbol": symbol,
+                "side": 'sell',
+                "quantity": round(quantity, 5),
+                "price": self.binance_client.amount_to_precision(symbol, take_profit_price),
+                "stopPrice": self.binance_client.amount_to_precision(symbol, stop_loss_price),
+                "stopLimitPrice": self.binance_client.amount_to_precision(symbol, stop_loss_limit_price),
+                "stopLimitTimeInForce": 'GTC'
+            }
+
+            oco_order = self.binance_client.private_post_order_oco(params)
+            # print(f"OCO order placed: {oco_order}")
+            self.send_message(f"OCO order placed with TP: {round(take_profit_price, 4)}, and SL: {round(stop_loss_price, 4)}. Price of {symbol}: {self.binance_client.fetch_ticker(symbol)['last']}")
+
+            orders = []
+            for order in oco_order["orderReports"]:
+                orders.append(order)
+
+            return orders[0]['orderId'], orders[1]['orderId']
+
         except Exception as e:
             print(f"Error placing OCO order: {e}")
             # Further error handling as needed (e.g., retry, log, raise)
 
-    def wait_for_oco_order_close(self, symbol, oco_order_id, check_interval=600):
+    def wait_for_oco_order_close(self, symbol, order_id_1, order_id_2, check_interval=600):
         """
-        Wait for an OCO order to close.
+        Wait for one of two OCO orders to close and report the status and type of both orders.
 
-        :param symbol: The symbol for the OCO order
-        :param oco_order_id: The ID of the OCO order
+        :param symbol: The symbol for the OCO orders
+        :param order_id_1: The ID of the first OCO order
+        :param order_id_2: The ID of the second OCO order
         :param check_interval: Interval in seconds to check the order status
         """
         while True:
             try:
-                order_status = self.binance_client.fetch_order(symbol=symbol, id=oco_order_id)
-                if order_status['status'] in ['closed', 'canceled', 'filled']:
-                    print(f"OCO order {oco_order_id} closed.")
-                    current_balance = self.binance_client.fetch_balance()['total']['USDT']
-                    difference = round((float(current_balance)-float(self.initial_balance)), 2)
-                    avg = (float(current_balance)-float(self.initial_balance))/2
-                    pct = round(((difference/avg)*100), 2)
-                    self.send_message(f"OCO order completed as {order_status['status']}. Initial balance: {self.initial_balance}, current {current_balance}. Pct Difference: {pct}%")
-                    return order_status
+                param1 = {
+                    "orderId": int(order_id_1)
+                }
+                param2 = {
+                    "orderId": int(order_id_2)
+                }
+                order_status_1 = self.binance_client.fetch_order(id=str(order_id_1), symbol=symbol, params=param1)
+                order_status_2 = self.binance_client.fetch_order(id=str(order_id_1), symbol=symbol, params=param2)
+
+                if order_status_1['status'] in ['closed', 'canceled', 'filled'] or order_status_2['status'] in ['closed', 'canceled', 'filled']:
+                    print(f"Order {order_id_1} status: {order_status_1['status']}, Type: {order_status_1['type']}")
+                    print(f"Order {order_id_2} status: {order_status_2['status']}, Type: {order_status_2['type']}")
+
+                    # Further actions can be added here if needed, like sending messages or calculating balances
+                    self.send_message(f"Order {order_id_1} status: {order_status_1['status']}, Type: {order_status_1['type']}.\nOrder {order_id_2} status: {order_status_2['status']}, Type: {order_status_2['type']}.\n\nInitial balance {self.initial_balance}, current balance: {self.binance_client.fetch_balance()['total']['USDT']} ")
+
+                    return order_status_1, order_status_2
                 else:
-                    print(f"OCO order {oco_order_id} is still open. Waiting...")
+                    print(f"Orders {order_id_1} and {order_id_2} are still open. Waiting...")
                 time.sleep(check_interval)
+
             except Exception as e:
                 print(f"Error checking order status: {e}")
                 time.sleep(check_interval)  # Implement retry or backoff strategy as needed
 
+
     def close_all_orders(self, symbol):
-        """
-        Cancel all open orders for a specified symbol.
-
-        :param symbol: Trading symbol (e.g., 'BTCUSDT')
-        :return: A list of responses from the exchange for each order cancellation attempt
-        """
         try:
-            # Fetch all open orders for the specified symbol
-            open_orders = self.binance_client.fetch_open_orders(symbol=symbol)
-            print(f"Found {len(open_orders)} open orders for {symbol}.")
-
-            # Attempt to cancel each open order
-            cancellation_responses = []
-            for order in open_orders:
-                response = self.binance_client.cancel_order(id=order['id'], symbol=symbol)
-                cancellation_responses.append(response)
-                print(f"Canceled order {order['id']}.")
-
-            return cancellation_responses
+            open_orders = self.binance_client.fetch_open_orders(symbol)
+            if len(open_orders) > 0:
+                print(f"Open orders {len(open_orders)}")
+                # for order in open_orders:
+                #     self.binance_client.cancel_order(order['id'], symbol, {'type': 'spot'})
+                print(f"Cancelling orders...")
+                self.binance_client.cancel_all_orders(symbol)
+                print(f"All orders of {symbol} are cancelled. Num of orders: {len(self.binance_client.fetch_open_orders(symbol))}")
+            else:
+                print("Nothing to cancel")
+                pass
 
         except Exception as e:
-            print(f"Error closing orders: {e}")
-            # Further error handling as needed (e.g., retry, log, raise)
-            return []
+            print(f"An unexpected error occurred: {e}")
 
     def place_market_order_with_stop_loss_and_take_profit(self, symbol, max_balance_percent=10, stop_loss_percent=30, take_profit_percent=0.9):
         """
@@ -271,10 +306,7 @@ class BullishSectorBot:
         """
 
         try:
-            # Close all orders
-            # self.close_all_orders(symbol)
-
-            # Fetch USDT balance
+            #Fetch USDT balance
             balance = self.binance_client.fetch_balance()
             usdt_balance = balance['total']['USDT']
 
@@ -291,7 +323,7 @@ class BullishSectorBot:
             quantity = float(self.binance_client.amount_to_precision(symbol, quantity))
 
             # Create a market buy order
-            buy_order = self.binance_client.create_market_buy_order(f"{base_asset}/USDT", 1.5)
+            buy_order = self.binance_client.create_market_buy_order(f"{base_asset}/USDT", 1.0)
             self.send_message(f"Buy order of {quantity} {base_asset}. Balance before order: {usdt_balance} USDT, after order {order_balance} USDT.")
 
             # Additional logic to set stop loss and take profit
@@ -303,13 +335,11 @@ class BullishSectorBot:
             stop_loss_price = filled_price * (1 - stop_loss_percent / 100)
             take_profit_price = filled_price * (1 + take_profit_percent / 100)
             
-            print(stop_loss_price, take_profit_price)
-
             # HERE TAKE PROFIT, STOP LOSS AND MONITORING
-            oco_order_id = self.place_oco_order(f"{base_asset}/USDT", quantity, take_profit_price, stop_loss_price, stop_loss_limit_percent=0.25)
+            order_id_1, order_id_2 = self.place_oco_order(symbol, quantity, take_profit_price, stop_loss_price, stop_loss_limit_percent=0.25)
             
             # Wait for OCO order
-            self.wait_for_oco_order_close(symbol, oco_order_id, check_interval=60)
+            self.wait_for_oco_order_close(symbol, order_id_1, order_id_2, check_interval=60)
 
 
         except Exception as e:
@@ -320,6 +350,7 @@ class BullishSectorBot:
     def run(self):
         while True:
             highest_score_symbol = self.get_highest_potential_token()
+            self.close_all_orders(highest_score_symbol)
             if highest_score_symbol is not None:
                 self.place_market_order_with_stop_loss_and_take_profit(highest_score_symbol)
             else:
