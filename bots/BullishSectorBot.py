@@ -176,93 +176,62 @@ class BullishSectorBot:
 
         return selected_symbol
     
-    def place_oco_order_manually(self, symbol, quantity, take_profit_price, stop_loss_price, stop_loss_limit_price):
+    def place_oco_order(self, symbol, quantity, take_profit_price, stop_loss_price, stop_loss_limit_percent) -> str:
         """
-        Manually place an OCO order by setting a limit order for take profit and a stop-limit order for stop loss.
+        Place an OCO order for stop loss and take profit.
 
         :param symbol: Trading symbol (e.g., 'BTCUSDT')
         :param quantity: Quantity of the asset to trade
         :param take_profit_price: Price at which to take profit
-        :param stop_loss_price: Trigger price for the stop loss
-        :param stop_loss_limit_price: Price at which the stop loss order will be executed
+        :param stop_loss_price: Price at which to set the stop loss
+
+        :return oco_order_id:str
         """
         try:
-            # Place the take profit limit order
-            take_profit_order = self.binance_client.create_limit_sell_order(
+            stop_loss_limit_price = stop_loss_price * (1 - stop_loss_limit_percent)  # Adjust the offset as needed
+            oco_order = self.binance_client.private_post_order_oco(
                 symbol=symbol,
-                amount=quantity,
-                price=take_profit_price
-            )
-            print(f"Take profit limit order placed: {take_profit_order}")
-
-            # Place the stop loss limit order
-            stop_loss_order = self.binance_client.create_order(
-                symbol=symbol,
-                type='STOP_LOSS_LIMIT',
                 side='sell',
-                amount=quantity,
-                price=stop_loss_limit_price,
-                params={'stopPrice': stop_loss_price}
+                quantity=quantity,
+                price=take_profit_price,
+                stopPrice=stop_loss_price,
+                stopLimitPrice=stop_loss_limit_price,
+                stopLimitTimeInForce='GTC'
             )
-            print(f"Stop loss limit order placed: {stop_loss_order}")
+            print(f"OCO order placed: {oco_order}")
+            self.send_message(f"OCO order placed with TP: {take_profit_price}, and SL: {stop_loss_price}. Price of {symbol}: {self.binance_client.fetch_ticker(symbol)['last']}")
+            oco_order_id = oco_order.get('orderListId', None)
 
-            ticker = self.binance_client.fetch_ticker(symbol)
-            current_price = ticker['last']
-
-            message = f"""===SETTING TP AND SL ORDERS============\n\nCurrent price of {str(symbol)} is {str(current_price)}.\nTake profit order placed with price {str(take_profit_price)} of {str(symbol)}.\nStop loss order placed with price {str(stop_loss_price)} of {str(symbol)}.\n\n=====================================\n\n
-            """
-
-            self.send_message(message)
-
-            return take_profit_order['id'], stop_loss_order['id']
-
-
+            return oco_order_id
         except Exception as e:
-            print(f"Error placing manual OCO orders: {e}")
+            print(f"Error placing OCO order: {e}")
+            # Further error handling as needed (e.g., retry, log, raise)
 
-    def manage_manual_oco_orders(self, symbol, take_profit_order_id, stop_loss_order_id):
+    def wait_for_oco_order_close(self, symbol, oco_order_id, check_interval=600):
         """
-        Manage the relationship between manually placed take profit and stop loss orders.
-        If one order is filled, cancel the other.
+        Wait for an OCO order to close.
 
-        :param symbol: Trading symbol (e.g., 'BTCUSDT')
-        :param take_profit_order_id: ID of the take profit limit order
-        :param stop_loss_order_id: ID of the stop loss limit order
+        :param symbol: The symbol for the OCO order
+        :param oco_order_id: The ID of the OCO order
+        :param check_interval: Interval in seconds to check the order status
         """
         while True:
             try:
-                print(f"Checking orders: {take_profit_order_id} and {stop_loss_order_id}")
-
-                # Fetch the current status of both orders
-                take_profit_order_status = self.binance_client.fetch_order(symbol=symbol, id=take_profit_order_id)
-                stop_loss_order_status = self.binance_client.fetch_order(symbol=symbol, id=stop_loss_order_id)
-
-                # Check if either order is filled
-                if take_profit_order_status['status'] == 'closed':
-                    # Cancel the stop loss order if the take profit order is filled
-                    self.binance_client.cancel_order(symbol=symbol, id=stop_loss_order_id)
-                    print(f"Take profit order filled. Stop loss order canceled.")
-                    message = f"""===TAKE PROFIT============\n\nTake profit order of {str(symbol)} filled. Initial balance was {str(self.initial_balance)} USDT. Now you have {str(self.binance_client.fetch_balance()['total']['USDT'])}
-                    """
-                    self.send_message(message)
-                    break
-
-                if stop_loss_order_status['status'] == 'closed':
-                    # Cancel the take profit order if the stop loss order is filled
-                    self.binance_client.cancel_order(symbol=symbol, id=take_profit_order_id)
-                    print(f"Stop loss order filled. Take profit order canceled.")
-                    message = f"""===STOP LOSS============\n\nStop loss order of {str(symbol)} filled. Initial balance was {str(self.initial_balance)} USDT. Now you have {str(self.binance_client.fetch_balance()['total']['USDT'])}
-                    """
-                    self.send_message(message)
-                    break
-
-                # Add a delay before the next check to prevent rate limit issues
-                time.sleep(10)
-
+                order_status = self.binance_client.fetch_order(symbol=symbol, id=oco_order_id)
+                if order_status['status'] in ['closed', 'canceled', 'filled']:
+                    print(f"OCO order {oco_order_id} closed.")
+                    current_balance = self.binance_client.fetch_balance()['total']['USDT']
+                    difference = round((float(current_balance)-float(self.initial_balance)), 2)
+                    avg = (float(current_balance)-float(self.initial_balance))/2
+                    pct = round(((difference/avg)*100), 2)
+                    self.send_message(f"OCO order completed as {order_status['status']}. Initial balance: {self.initial_balance}, current {current_balance}. Pct Difference: {pct}%")
+                    return order_status
+                else:
+                    print(f"OCO order {oco_order_id} is still open. Waiting...")
+                time.sleep(check_interval)
             except Exception as e:
-                print(f"Error managing OCO orders: {e}")
-                # Implement retry or backoff strategy as needed
-                time.sleep(10)
+                print(f"Error checking order status: {e}")
+                time.sleep(check_interval)  # Implement retry or backoff strategy as needed
 
     def close_all_orders(self, symbol):
         """
@@ -290,52 +259,63 @@ class BullishSectorBot:
             # Further error handling as needed (e.g., retry, log, raise)
             return []
 
-    def place_market_order_with_stop_loss_and_take_profit(self, symbol, stop_loss_percent=30, take_profit_percent=0.9):
+    def place_market_order_with_stop_loss_and_take_profit(self, symbol, max_balance_percent=10, stop_loss_percent=30, take_profit_percent=0.9):
         """
         Place a market order with stop loss and take profit.
 
         :param symbol: The symbol to trade (e.g., 'BTC/USDT')
-        :param quantity: The quantity of the symbol to trade
+        :param max_balance_percent: Maximum percentage of balance to use for the order
         :param stop_loss_percent: The stop loss percentage
         :param take_profit_percent: The take profit percentage
         :return: Order details if successful, None otherwise
         """
 
         try:
-            #CLOSE all
-            self.close_all_orders(symbol)
+            # Close all orders
+            # self.close_all_orders(symbol)
+
             # Fetch USDT balance
             balance = self.binance_client.fetch_balance()
             usdt_balance = balance['total']['USDT']
 
+            # Use only a portion of the balance for this order
+            order_balance = usdt_balance * (max_balance_percent / 100)
+
             # Fetch current market price for the symbol
             ticker = self.binance_client.fetch_ticker(symbol)
             current_price = ticker['last']
-            
+
             # Calculate the quantity of the base asset to buy
             base_asset = symbol[:-4]  # Assuming all pairs end with 'USDT'
-            quantity = (usdt_balance / current_price)*0.9
+            quantity = (order_balance / current_price)
             quantity = float(self.binance_client.amount_to_precision(symbol, quantity))
 
-            self.binance_client.create_market_buy_order(f"{base_asset}/USDT", quantity)
-            self.send_message(f"\n\n\n===BUY ORDER============\n\nBuy order of {quantity} {base_asset}, with balance of {usdt_balance} USDT.\n\n========================\n")
-        
+            # Create a market buy order
+            buy_order = self.binance_client.create_market_buy_order(f"{base_asset}/USDT", 1.5)
+            self.send_message(f"Buy order of {quantity} {base_asset}. Balance before order: {usdt_balance} USDT, after order {order_balance} USDT.")
+
+            # Additional logic to set stop loss and take profit
+
+            # Check if the market order is filled and get the filled price
+            filled_price = current_price
+            
+            # Calculate stop loss and take profit prices
+            stop_loss_price = filled_price * (1 - stop_loss_percent / 100)
+            take_profit_price = filled_price * (1 + take_profit_percent / 100)
+            
+            print(stop_loss_price, take_profit_price)
+
+            # HERE TAKE PROFIT, STOP LOSS AND MONITORING
+            oco_order_id = self.place_oco_order(f"{base_asset}/USDT", quantity, take_profit_price, stop_loss_price, stop_loss_limit_percent=0.25)
+            
+            # Wait for OCO order
+            self.wait_for_oco_order_close(symbol, oco_order_id, check_interval=60)
+
+
         except Exception as e:
             print(f"An error occurred: {e}")
-            
             return None
         
-        # # Check if the market order is filled and get the filled price
-        filled_price =  current_price
-
-        # Calculate stop loss and take profit prices
-        stop_loss_price = filled_price * (1 - stop_loss_percent / 100)
-        take_profit_price = filled_price * (1 + take_profit_percent / 100)
-
-        # HERE TAKE PROFIT, STOP LOSS AND MONITORING
-        take_profit_order, stop_loss_order = self.place_oco_order_manually(symbol, quantity, take_profit_price, stop_loss_price, stop_loss_limit_price=stop_loss_price)
-    
-        self.manage_manual_oco_orders(symbol, take_profit_order, stop_loss_order)
 
     def run(self):
         while True:

@@ -23,5 +23,5 @@ class Bot:
     
 if __name__ == "__main__":
     # bot = Bot(symbols=["DARUSDT", "ILVUSDT", "MCUSDT", "PYRUSDT", "FLOKIUSDT"])
-    bot = Bot(symbols=["ETHUSDT"])
+    bot = Bot(symbols=["DOTUSDT"])
     bot.run()
