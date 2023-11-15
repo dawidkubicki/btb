@@ -58,40 +58,50 @@ class BullishSectorBot:
             :param lookback: Integer, number of data points to fetch
             :return: DataFrame, containing the historical candlestick data
             """
-            if interval == "1m" or "5min" or "15min":
-                 limit = 500
-            elif interval == "1h" or "4h":
-                 limit = 134
-            else:
-                 limit = 12
+            try:
 
-            all_candles = []
+                if interval == "1m" or "5min" or "15min":
+                    limit = 500
+                elif interval == "1h" or "4h":
+                    limit = 134
+                else:
+                    limit = 12
 
-            while lookback > 0:
-                fetch_limit = min(lookback, limit)
-                candles = self.binance_client.fetch_ohlcv(symbol, timeframe=interval, limit=fetch_limit)
-                if not candles:
-                    break
-                all_candles = candles + all_candles
-                lookback -= fetch_limit
-                # Adjusting the since parameter to fetch earlier data
-                since = candles[0][0] - self.binance_client.parse_timeframe(interval) * fetch_limit * 1000
-                self.binance_client.options['params'] = {'startTime': since}
+                all_candles = []
 
-            # Convert to DataFrame
-            columns = ['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume']
-            df = pd.DataFrame(all_candles, columns=columns)
-            df['Timestamp'] = pd.to_datetime(df['Timestamp'], unit='ms')
+                while lookback > 0:
+                    fetch_limit = min(lookback, limit)
+                    candles = self.binance_client.fetch_ohlcv(symbol, timeframe=interval, limit=fetch_limit)
+                    if not candles:
+                        break
+                    all_candles = candles + all_candles
+                    lookback -= fetch_limit
+                    # Adjusting the since parameter to fetch earlier data
+                    since = candles[0][0] - self.binance_client.parse_timeframe(interval) * fetch_limit * 1000
+                    self.binance_client.options['params'] = {'startTime': since}
 
-            return df
+                # Convert to DataFrame
+                columns = ['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume']
+                df = pd.DataFrame(all_candles, columns=columns)
+                df['Timestamp'] = pd.to_datetime(df['Timestamp'], unit='ms')
+
+                return df
+
+            except Exception as e:
+                print(f"Error while fetching historical data with code message: {e}.")
+                self.send_message(f"Error while fetching historical data with code message: {e}.")
 
     def get_balance(self):
-        non_zero_balances = []
-        balances = self.binance_client.fetch_balance()
-        for currency, amount in balances['total'].items():
-            if amount > 0:
-                non_zero_balances.append({currency: round(amount, 6)})
-        return non_zero_balances
+        try:
+            non_zero_balances = []
+            balances = self.binance_client.fetch_balance()
+            for currency, amount in balances['total'].items():
+                if amount > 0:
+                    non_zero_balances.append({currency: round(amount, 6)})
+            return non_zero_balances
+        except Exception as e:
+            print(f"Error while getting balance with code message: {e}.")
+            self.send_message(f"Error while getting balance with code message: {e}.")
     
     def calculate_indicators(self, symbol, interval, lookback):
         df = self.fetch_historical_data_binance(symbol, interval, lookback)
@@ -122,86 +132,95 @@ class BullishSectorBot:
         return df
     
     def calculate_score(self, data):
-        score = 0
+        try:
+            score = 0
 
-        # Ensure data is not empty
-        if data.empty:
+            # Ensure data is not empty
+            if data.empty:
+                return score
+
+            # Get the latest data point
+            latest_data = data.iloc[-1]
+
+            # BB
+            distance_to_upper = abs(latest_data['Close'] - latest_data['bb_bbh'])
+            distance_to_lower = abs(latest_data['Close'] - latest_data['bb_bbl'])
+
+            if distance_to_lower < distance_to_upper:
+                score += 1
+
+            # MA
+            if latest_data['Close'] > latest_data['ema']:
+                score += 1
+
+            # EMA Crossover
+            if latest_data['ema_short'] > latest_data['ema_long']:
+                score += 1  # Adjust the points based on your criteria
+
+            # RSI
+            if 50 < latest_data['rsi'] < 70:
+                score += 1  # Adjust the points based on your criteria
+
+            # MACD
+            if latest_data['macd'] > latest_data['macd_signal']:
+                score += 1  # Adjust the points based on your criteria
+
+            # For Mean Reversion Strategy ============================
+
+            # ROC for potential reversal
+            if latest_data['roc'] < -5:  # Example threshold
+                score += 2
+
+            # High Standard Deviation (Volatility)
+            if latest_data['std_dev'] > data['std_dev'].mean():  # Above average volatility
+                score += 2
+
+            # Mean Deviation from Moving Average
+            if abs(latest_data['mean_dev_from_ma']) > data['mean_dev_from_ma'].mean():  # Far from mean
+                score += 2
+
+            # Stochastic Oscillator for overbought/oversold
+            if latest_data['stoch'] < 20 or latest_data['stoch'] > 80:  # Overbought/Oversold conditions
+                score += 2
+
+
             return score
-
-        # Get the latest data point
-        latest_data = data.iloc[-1]
-
-        # BB
-        distance_to_upper = abs(latest_data['Close'] - latest_data['bb_bbh'])
-        distance_to_lower = abs(latest_data['Close'] - latest_data['bb_bbl'])
-
-        if distance_to_lower < distance_to_upper:
-            score += 1
-
-        # MA
-        if latest_data['Close'] > latest_data['ema']:
-            score += 1
-
-        # EMA Crossover
-        if latest_data['ema_short'] > latest_data['ema_long']:
-            score += 1  # Adjust the points based on your criteria
-
-        # RSI
-        if 50 < latest_data['rsi'] < 70:
-            score += 1  # Adjust the points based on your criteria
-
-        # MACD
-        if latest_data['macd'] > latest_data['macd_signal']:
-            score += 1  # Adjust the points based on your criteria
-
-        # For Mean Reversion Strategy ============================
-
-        # ROC for potential reversal
-        if latest_data['roc'] < -5:  # Example threshold
-            score += 1
-
-        # High Standard Deviation (Volatility)
-        if latest_data['std_dev'] > data['std_dev'].mean():  # Above average volatility
-            score += 1
-
-        # Mean Deviation from Moving Average
-        if abs(latest_data['mean_dev_from_ma']) > data['mean_dev_from_ma'].mean():  # Far from mean
-            score += 1
-
-        # Stochastic Oscillator for overbought/oversold
-        if latest_data['stoch'] < 20 or latest_data['stoch'] > 80:  # Overbought/Oversold conditions
-            score += 1
-
-
-        return score
     
+        except Exception as e:
+            print(f"Error while calculating the score with code message: {e}.")
+            self.send_message(f"Error while calculating the score with code message: {e}.")
+
     def get_highest_potential_token(self):
-        ta_df = []
-        scores = {}
-        for symbol in self.symbols:
-            df = self.calculate_indicators(symbol, self.interval, self.lookback)
-            ta_df.append({symbol: df})
-            scores[symbol] = self.calculate_score(df)
+        try:
+            ta_df = []
+            scores = {}
+            for symbol in self.symbols:
+                df = self.calculate_indicators(symbol, self.interval, self.lookback)
+                ta_df.append({symbol: df})
+                scores[symbol] = self.calculate_score(df)
 
-        # Find the maximum score
-        max_score = max(scores.values())
+            # Find the maximum score
+            max_score = max(scores.values())
 
-        # Check if all scores are zero
-        if max_score == 0:
-            print("No suitable symbols found. All scores are zero.")
-            return None
+            # Check if all scores are zero
+            if max_score == 0:
+                print("No suitable symbols found. All scores are zero.")
+                return None
 
-        # Filter symbols with the maximum score
-        top_symbols = [symbol for symbol, score in scores.items() if score == max_score]
+            # Filter symbols with the maximum score
+            top_symbols = [symbol for symbol, score in scores.items() if score == max_score]
 
-        # Randomly select one symbol from those with the highest score
-        selected_symbol = random.choice(top_symbols) if top_symbols else None
+            # Randomly select one symbol from those with the highest score
+            selected_symbol = random.choice(top_symbols) if top_symbols else None
 
-        # Print or return the selected symbol
-        print(f"Selected Symbol: {selected_symbol} with score {scores[selected_symbol]}")
+            # Print or return the selected symbol
+            print(f"Selected Symbol: {selected_symbol} with score {scores[selected_symbol]}")
 
-        return selected_symbol
-    
+            return selected_symbol
+        except Exception as e:
+            print(f"Error while selecting symbol with the highest score of code message: {e}.")
+            self.send_message(f"Error while selecting symbol with the highest score of code message: {e}.")
+
     def place_oco_order(self, symbol, quantity, take_profit_price, stop_loss_price, stop_loss_limit_percent) -> str:
         """
         Place an OCO order for stop loss and take profit.
@@ -228,7 +247,7 @@ class BullishSectorBot:
 
             oco_order = self.binance_client.private_post_order_oco(params)
             # print(f"OCO order placed: {oco_order}")
-            self.send_message(f"OCO order placed with TP: {round(take_profit_price, 4)}, and SL: {round(stop_loss_price, 4)}. Price of {symbol}: {self.binance_client.fetch_ticker(symbol)['last']}")
+            self.send_message(f"OCO order placed with TP: {round(take_profit_price, 4)}, and SL: {round(stop_loss_price, 4)}. Price of {symbol}: {self.binance_client.fetch_ticker(symbol)['last']}\n\n--------- Waiting ⏳")
 
             orders = []
             for order in oco_order["orderReports"]:
@@ -238,6 +257,7 @@ class BullishSectorBot:
 
         except Exception as e:
             print(f"Error placing OCO order: {e}")
+            self.send_message(f"Error placing OCO order: {e}")
             # Further error handling as needed (e.g., retry, log, raise)
 
     def wait_for_oco_order_close(self, symbol, order_id_1, order_id_2, check_interval=600):
@@ -265,7 +285,11 @@ class BullishSectorBot:
                     print(f"Order {order_id_2} status: {order_status_2['status']}, Type: {order_status_2['type']}")
 
                     # Further actions can be added here if needed, like sending messages or calculating balances
-                    self.send_message(f"Order {order_id_1} status: {order_status_1['status']}, Type: {order_status_1['type']}.\nOrder {order_id_2} status: {order_status_2['status']}, Type: {order_status_2['type']}.\n\nInitial balance {self.initial_balance}, current balance: {self.binance_client.fetch_balance()['total']['USDT']} ")
+                    if (self.binance_client.fetch_balance()['total']['USDT']-self.initial_balance) > 0:
+                        self.send_message(f"🤑📈 Order {order_id_1} status: {order_status_1['status']}, Type: {order_status_1['type']}.\nOrder {order_id_2} status: {order_status_2['status']}, Type: {order_status_2['type']}.\n\nInitial balance {self.initial_balance}, current balance: {self.binance_client.fetch_balance()['total']['USDT']} 💵\n\n---------")
+                    else:
+                        self.send_message(f"📉 Order {order_id_1} status: {order_status_1['status']}, Type: {order_status_1['type']}.\nOrder {order_id_2} status: {order_status_2['status']}, Type: {order_status_2['type']}.\n\nInitial balance {self.initial_balance}, current balance: {self.binance_client.fetch_balance()['total']['USDT']} 💵\n\n---------")
+
 
                     return order_status_1, order_status_2
                 else:
@@ -273,7 +297,8 @@ class BullishSectorBot:
                 time.sleep(check_interval)
 
             except Exception as e:
-                print(f"Error checking order status: {e}")
+                print(f"Error checking OCO orders status: {e}")
+                self.send_message(f"Error checking OCO orders status: {e}")
                 time.sleep(check_interval)  # Implement retry or backoff strategy as needed
 
 
@@ -282,11 +307,10 @@ class BullishSectorBot:
             open_orders = self.binance_client.fetch_open_orders(symbol)
             if len(open_orders) > 0:
                 print(f"Open orders {len(open_orders)}")
-                # for order in open_orders:
-                #     self.binance_client.cancel_order(order['id'], symbol, {'type': 'spot'})
                 print(f"Cancelling orders...")
                 self.binance_client.cancel_all_orders(symbol)
                 print(f"All orders of {symbol} are cancelled. Num of orders: {len(self.binance_client.fetch_open_orders(symbol))}")
+                self.send_message(f"All orders of {symbol} are cancelled. Num of orders: {len(self.binance_client.fetch_open_orders(symbol))}")
             else:
                 print("Nothing to cancel")
                 pass
@@ -294,7 +318,7 @@ class BullishSectorBot:
         except Exception as e:
             print(f"An unexpected error occurred: {e}")
 
-    def place_market_order_with_stop_loss_and_take_profit(self, symbol, max_balance_percent=10, stop_loss_percent=30, take_profit_percent=0.9):
+    def place_market_order_with_stop_loss_and_take_profit(self, symbol, max_balance_percent=1, stop_loss_percent=30, take_profit_percent=0.9):
         """
         Place a market order with stop loss and take profit.
 
@@ -323,10 +347,8 @@ class BullishSectorBot:
             quantity = float(self.binance_client.amount_to_precision(symbol, quantity))
 
             # Create a market buy order
-            buy_order = self.binance_client.create_market_buy_order(f"{base_asset}/USDT", 1.0)
-            self.send_message(f"Buy order of {quantity} {base_asset}. Balance before order: {usdt_balance} USDT, after order {order_balance} USDT.")
-
-            # Additional logic to set stop loss and take profit
+            buy_order = self.binance_client.create_market_buy_order(f"{base_asset}/USDT", quantity)
+            self.send_message(f"💸 Buy order of {quantity} {base_asset} with price {current_price}. Balance before order: {round(usdt_balance, 2)} USDT, after order {round(usdt_balance-order_balance, 2)} USDT.")
 
             # Check if the market order is filled and get the filled price
             filled_price = current_price
@@ -334,12 +356,22 @@ class BullishSectorBot:
             # Calculate stop loss and take profit prices
             stop_loss_price = filled_price * (1 - stop_loss_percent / 100)
             take_profit_price = filled_price * (1 + take_profit_percent / 100)
+
+            # Calculate the estimated profit
+            estimated_profit = (take_profit_price - filled_price) * quantity
+
+            # Calculate the trading fee (assuming 0.1000% fee)
+            trading_fee = take_profit_price * quantity * 0.001
+
+            # Calculate the net profit after deducting the trading fee
+            net_profit = estimated_profit - trading_fee
             
             # HERE TAKE PROFIT, STOP LOSS AND MONITORING
             order_id_1, order_id_2 = self.place_oco_order(symbol, quantity, take_profit_price, stop_loss_price, stop_loss_limit_percent=0.25)
-            
+            self.send_message(f"Estimated Net Profit: {round(net_profit, 2)} USDT (including trading fees)")
+
             # Wait for OCO order
-            self.wait_for_oco_order_close(symbol, order_id_1, order_id_2, check_interval=60)
+            self.wait_for_oco_order_close(symbol, order_id_1, order_id_2, check_interval=120)
 
 
         except Exception as e:
