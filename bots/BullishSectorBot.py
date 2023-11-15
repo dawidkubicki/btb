@@ -318,7 +318,7 @@ class BullishSectorBot:
         except Exception as e:
             print(f"An unexpected error occurred: {e}")
 
-    def place_market_order_with_stop_loss_and_take_profit(self, symbol, max_balance_percent=1, stop_loss_percent=30, take_profit_percent=0.9):
+    def place_market_order_with_stop_loss_and_take_profit(self, symbol, max_balance_percent=85, stop_loss_percent=30, take_profit_percent=0.9):
         """
         Place a market order with stop loss and take profit.
 
@@ -371,7 +371,7 @@ class BullishSectorBot:
             self.send_message(f"Estimated Net Profit: {round(net_profit, 2)} USDT (including trading fees)")
 
             # Wait for OCO order
-            self.wait_for_oco_order_close(symbol, order_id_1, order_id_2, check_interval=120)
+            self.wait_for_oco_order_close(symbol, order_id_1, order_id_2, check_interval=300)
 
 
         except Exception as e:
